@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="USDM Scanner">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#10151f">
+<title>Binance USDⓈ-M Scanner</title>
+<style>
+:root{color-scheme:dark;--bg:#10151f;--panel:#1a2332;--muted:#9aa8ba;--text:#f2f5fa;--green:#21c58e;--red:#f06470;--blue:#5aa7ff;--yellow:#f0bd55}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
+header{background:var(--panel);border-radius:16px;padding:16px;margin:10px 0 12px;position:sticky;top:env(safe-area-inset-top);z-index:3;box-shadow:0 5px 18px #0005}
+h1{font-size:19px;margin:0 0 4px}.sub,.muted{color:var(--muted);font-size:12px}.status{font-size:13px;margin:12px 0 7px;color:var(--yellow)}
+.stats{display:flex;justify-content:space-between;align-items:center;gap:8px}.btn{border:0;border-radius:10px;background:var(--blue);color:#07111e;padding:10px 14px;font-weight:700;font-size:13px}
+.note{font-size:11px;line-height:1.45;color:var(--muted);margin-top:12px}
+.summary{display:flex;gap:8px;margin:10px 0}.pill{background:var(--panel);border-radius:999px;padding:7px 10px;font-size:11px;color:var(--muted)}
+.card{background:var(--panel);border-radius:15px;padding:14px;margin:10px 0;border-left:4px solid var(--muted)}
+.card.long{border-color:var(--green)}.card.short{border-color:var(--red)}
+.top{display:flex;justify-content:space-between;align-items:center}.symbol{font-size:17px;font-weight:800}.side{font-weight:800;font-size:12px;padding:5px 9px;border-radius:7px}.long .side{background:var(--green);color:#061b14}.short .side{background:var(--red);color:#25090d}
+.bias{font-size:10px;margin:9px 0 12px}.long .bias{color:var(--green)}.short .bias{color:var(--red)}
+.row{display:flex;justify-content:space-between;padding:5px 0;font-size:12px}.row span:first-child{color:var(--muted)}.entry{font-weight:700}.sl{color:var(--red);font-weight:700}.tp{color:var(--green);font-weight:700}
+.zone,.meta{font-size:10px;color:var(--muted);margin-top:8px}
+.empty{background:var(--panel);padding:22px 16px;border-radius:14px;text-align:center;margin-top:10px}.empty strong{display:block;margin-bottom:7px}
+footer{font-size:10px;color:var(--muted);line-height:1.5;padding:16px 3px 28px}
+</style>
+</head>
+<body>
+<header>
+  <h1>BINANCE FUTURES SCANNER</h1>
+  <div class="sub">USDⓈ-M · USDT 무기한 · 거래대금 상위 100</div>
+  <div class="status" id="status">● 연결 준비 중</div>
+  <div class="stats"><div class="muted" id="stats">첫 스캔 대기 중 · 60초 자동 갱신</div><button class="btn" id="scanBtn">지금 스캔</button></div>
+  <div class="note">1분 BOS + 수요·공급 재시험 · 5m / 15m / 1h / 4h 방향 일치 · 손절 자동 계산 · 기본 익절 2R</div>
+</header>
+<div class="summary"><span class="pill">롱·숏 양방향</span><span class="pill">SMA200 미사용</span><span class="pill">API 키 불필요</span></div>
+<main id="results"><div class="empty"><strong>스캔 준비 중</strong><span class="muted">바이낸스 공개 시세에 연결합니다.</span></div></main>
+<footer>
+  무료 브라우저 버전 · 주문 기능 없음 · 공개 시장 데이터만 사용<br>
+  앱을 화면에 열어둬야 60초 자동 갱신이 유지됩니다. iOS가 탭을 절전 처리하면 갱신이 멈출 수 있습니다.<br>
+  BOS 및 수요·공급 구간은 원본 SMOG/G2의 복제가 아닌 근사 규칙입니다. 실제 매매 전 검증하세요.
+</footer>
+<script>
+"use strict";
+const API="https://fapi.binance.com", TOP_N=100, PERIOD=60000, R=2;
+const TFS=["5m","15m","1h","4h"];
+const $=id=>document.getElementById(id);
+let busy=false, timer=null, lastData=[];
+function setStatus(s,color="#f0bd55"){$("status").textContent="● "+s;$("status").style.color=color}
+function fmt(n){if(n>=1000)return n.toLocaleString("en-US",{maximumFractionDigits:3});if(n>=1)return n.toFixed(5);if(n>=.01)return n.toFixed(6);return n.toFixed(8)}
+function vol(n){return n>=1e9?"$"+(n/1e9).toFixed(2)+"B":n>=1e6?"$"+(n/1e6).toFixed(1)+"M":"$"+(n/1e3).toFixed(1)+"K"}
+async function api(path,params={}) {
+ const u=new URL(API+path);Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));
+ const r=await fetch(u,{cache:"no-store"});if(!r.ok)throw Error("Binance HTTP "+r.status);
+ return r.json();
+}
+async function universe(){
+ const [info,tickers]=await Promise.all([api("/fapi/v1/exchangeInfo"),api("/fapi/v1/ticker/24hr")]);
+ const valid=new Set(info.symbols.filter(s=>s.status==="TRADING"&&s.contractType==="PERPETUAL"&&s.quoteAsset==="USDT"&&s.marginAsset==="USDT").map(s=>s.symbol));
+ return tickers.filter(t=>valid.has(t.symbol)).map(t=>({symbol:t.symbol,quoteVolume:+t.quoteVolume})).sort((a,b)=>b.quoteVolume-a.quoteVolume).slice(0,TOP_N);
+}
+async function klines(symbol,interval){
+ const a=await api("/fapi/v1/klines",{symbol,interval,limit:100});
+ return a.slice(0,-1).map(x=>({open:+x[1],high:+x[2],low:+x[3],close:+x[4],time:+x[0]}));
+}
+function pivots(c,left=2,right=2){
+ const highs=[],lows=[];
+ for(let i=left;i<c.length-right;i++){
+  const h=c[i].high,l=c[i].low;
+  if(Array.from({length:left},(_,k)=>c[i-left+k].high).every(v=>h>v)&&Array.from({length:right},(_,k)=>c[i+1+k].high).every(v=>h>=v))highs.push([i,h]);
+  if(Array.from({length:left},(_,k)=>c[i-left+k].low).every(v=>l<v)&&Array.from({length:right},(_,k)=>c[i+1+k].low).every(v=>l<=v))lows.push([i,l]);
+ }
+ return {highs,lows};
+}
+function bias(c){
+ if(c.length<25)return "NEUTRAL";const {highs,lows}=pivots(c);
+ if(highs.length<2||lows.length<2)return "NEUTRAL";
+ if(highs.at(-1)[1]>highs.at(-2)[1]&&lows.at(-1)[1]>lows.at(-2)[1])return "LONG";
+ if(highs.at(-1)[1]<highs.at(-2)[1]&&lows.at(-1)[1]<lows.at(-2)[1])return "SHORT";
+ return "NEUTRAL";
+}
+function setup(c,side){
+ if(c.length<30)return null;
+ const {highs,lows}=pivots(c.slice(0,-1));let p,level,bos=-1,zi=-1,zlo,zhi;
+ if(side==="LONG"){
+  const cand=highs.filter(x=>x[0]<c.length-3);if(!cand.length)return null;
+  [p,level]=cand.at(-1);
+  for(let i=Math.max(p+1,c.length-9);i<c.length;i++)if(c[i].close>level){bos=i;break}
+  if(bos<0)return null;
+  for(let i=bos-1;i>=Math.max(0,bos-16);i--)if(c[i].close<c[i].open){zi=i;break}
+  if(zi<0)return null;zlo=c[zi].low;zhi=Math.max(c[zi].open,c[zi].close);
+ }else{
+  const cand=lows.filter(x=>x[0]<c.length-3);if(!cand.length)return null;
+  [p,level]=cand.at(-1);
+  for(let i=Math.max(p+1,c.length-9);i<c.length;i++)if(c[i].close<level){bos=i;break}
+  if(bos<0)return null;
+  for(let i=bos-1;i>=Math.max(0,bos-16);i--)if(c[i].close>c[i].open){zi=i;break}
+  if(zi<0)return null;zhi=c[zi].high;zlo=Math.min(c[zi].open,c[zi].close);
+ }
+ const recent=c.slice(Math.max(bos+1,c.length-4)),last=c.at(-1);
+ const touched=recent.some(x=>x.low<=zhi&&x.high>=zlo);
+ const confirmed=side==="LONG"?(last.close>last.open&&last.close>=zlo):(last.close<last.open&&last.close<=zhi);
+ if(!touched||!confirmed)return null;
+ const entry=last.close,stop=side==="LONG"?zlo:zhi;
+ if((side==="LONG"&&stop>=entry)||(side==="SHORT"&&stop<=entry))return null;
+ const target=side==="LONG"?entry+(entry-stop)*R:entry-(stop-entry)*R;
+ return {side,entry,stop,target,zlo,zhi,risk:Math.abs(entry-stop)/entry*100};
+}
+async function scanOne(item){
+ try{
+  const frames=await Promise.all(TFS.map(tf=>klines(item.symbol,tf)));
+  const biases=Object.fromEntries(TFS.map((tf,i)=>[tf,bias(frames[i])]));
+  const vals=Object.values(biases),side=vals.every(x=>x==="LONG")?"LONG":vals.every(x=>x==="SHORT")?"SHORT":null;
+  if(!side)return null;
+  const one=await klines(item.symbol,"1m"),s=setup(one,side);
+  return s?{...s,...item,biases}:null;
+ }catch(e){return null}
+}
+async function scan(){
+ if(busy)return;busy=true;$("scanBtn").disabled=true;$("scanBtn").textContent="검색 중";
+ setStatus("시장 데이터 조회 중");
+ $("stats").textContent="거래대금 상위 100개 종목 검사 중";
+ $("results").innerHTML='<div class="empty"><strong>종목 검색 중</strong><span class="muted">상위 시간봉 방향과 1분 진입 조건을 확인하고 있습니다.</span></div>';
+ const start=Date.now();
+ try{
+  const uni=await universe(),found=[];
+  // Concurrency limit protects mobile browser and API rate limits.
+  let idx=0;
+  async function worker(){while(idx<uni.length){const item=uni[idx++];const s=await scanOne(item);if(s)found.push(s)}}
+  await Promise.all(Array.from({length:8},worker));
+  found.sort((a,b)=>b.quoteVolume-a.quoteVolume);lastData=found;
+  render(found);
+  const elapsed=((Date.now()-start)/1000).toFixed(1),now=new Date().toLocaleTimeString("ko-KR");
+  setStatus("정상 완료 · "+elapsed+"초","#21c58e");
+  $("stats").textContent=found.length+"개 신호 · "+uni.length+"개 종목 · "+now;
+ }catch(e){
+  setStatus("연결 오류","#f06470");
+  $("stats").textContent=e.message+" · 네트워크 또는 API 연결 확인";
+  $("results").innerHTML='<div class="empty"><strong>데이터를 가져오지 못했습니다.</strong><span class="muted">'+escapeHtml(e.message)+'</span><br><br><span class="muted">Safari에서 인터넷 연결과 바이낸스 API 접속을 확인하세요.</span></div>';
+ }finally{
+  busy=false;$("scanBtn").disabled=false;$("scanBtn").textContent="지금 스캔";
+  clearTimeout(timer);timer=setTimeout(scan,Math.max(1000,PERIOD-(Date.now()-start)));
+ }
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function render(items){
+ if(!items.length){$("results").innerHTML='<div class="empty"><strong>현재 진입 신호 없음</strong><span class="muted">조건을 만족하는 종목이 없습니다. 다음 스캔까지 대기합니다.</span></div>';return}
+ $("results").innerHTML=items.map(s=>`<article class="card ${s.side.toLowerCase()}">
+ <div class="top"><div class="symbol">${s.symbol}</div><div class="side">${s.side}</div></div>
+ <div class="bias">${TFS.map(tf=>tf+" "+s.biases[tf]).join("　")}</div>
+ <div class="row"><span>진입가</span><b class="entry">${fmt(s.entry)}</b></div>
+ <div class="row"><span>손절가</span><b class="sl">${fmt(s.stop)}</b></div>
+ <div class="row"><span>익절가 · 2R</span><b class="tp">${fmt(s.target)}</b></div>
+ <div class="zone">수요·공급 구간　${fmt(s.zlo)} ~ ${fmt(s.zhi)}</div>
+ <div class="meta">손절 거리 ${s.risk.toFixed(2)}%　·　24h 거래대금 ${vol(s.quoteVolume)}</div>
+ </article>`).join("");
+}
+$("scanBtn").addEventListener("click",()=>{clearTimeout(timer);scan()});
+scan();
+</script>
+</body>
+</html>
